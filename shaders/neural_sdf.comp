@@ -1,0 +1,235 @@
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+#define WORKGROUP_SIZE 16
+layout (local_size_x = WORKGROUP_SIZE, local_size_y = WORKGROUP_SIZE, local_size_z = 1 ) in;
+
+#define fov 90.
+#define itfov 1.0/(tan(3.141592654*fov/(180.*2.)))
+
+#define CAMERA_FOV      	itfov
+#define EPS     	    0.005
+#define MAX_DIST     	10.
+#define MAX_STEPS		70
+
+#define SCREEN_WIDTH params.width
+#define SCREEN_HEIGHT params.height
+
+const float W_0 = 30.0; 
+
+struct Pixel{
+  vec4 value;
+};
+
+layout(push_constant) uniform params_t
+{
+  int width;
+  int height;
+  int NHL;
+  int size;
+
+} params;
+
+layout(std140, binding = 0) buffer buf
+{
+   Pixel imageData[];
+};
+
+layout(std430, binding = 1) buffer weights
+{
+   float w_b[];
+};
+
+float forward(vec3 p) {
+	
+	float activations[512];
+
+	// zero out;
+	for (int i = 0; i < 2*params.size; ++i) {
+		activations[i] = 0.0f;
+	}
+
+	activations[0] = p.x;
+	activations[1] = p.y;
+	activations[2] = p.z;
+	int half_part = 0;
+
+	// ===== Layer 0 =====
+	// z = Wx + b
+	for (int i = 0; i < params.size; ++i) {
+		for (int j = 0; j < 3; ++j) {
+			activations[params.size * ((half_part + 1)%2) + i] += w_b[i * 3 + j] * activations[params.size * ((half_part)%2) + j];
+		}
+	}
+	
+	// + b
+	for (int i = 0; i < params.size; ++i) {
+		activations[params.size * ((half_part + 1)%2) + i] += w_b[params.size * 3 + i];
+	}
+
+	// sin
+	for (int i = 0; i < params.size; ++i) {
+		activations[params.size * ((half_part + 1)%2) + i] = sin(W_0 * activations[params.size * ((half_part + 1)%2) + i]);
+	}
+
+	// ===== Hidden layers =====
+	int w_b_pos = 4 * params.size;
+	for (int l = 0; l < params.NHL; ++l) {
+		//zero
+		for (int i = 0; i < params.size; ++i) {
+			activations[(params.size * (half_part % 2)) + i] = 0.0f;
+		}
+		// z = Wx + b
+		for (int i = 0; i < params.size; ++i) {
+			for (int j = 0; j < params.size; ++j) {
+				activations[(params.size * (half_part % 2)) + i] += activations[(params.size * ((half_part + 1) % 2)) + j] * w_b[w_b_pos + i * params.size + j];
+			}
+		}
+		// + b
+		for (int i = 0; i < params.size; ++i) {
+			activations[(params.size * (half_part % 2)) + i] += w_b[w_b_pos + params.size * params.size + i];
+		}
+		// sin
+		for (int i = 0; i < params.size; ++i) {
+			activations[(params.size * (half_part % 2)) + i] = sin(W_0 * activations[(params.size * (half_part % 2)) + i]);
+		}
+		w_b_pos += (params.size + 1) * params.size;
+		half_part = (half_part + 1) % 2;
+	}
+
+	// ===== Output layer =====
+	//zero
+	activations[(params.size * (half_part % 2))] = 0.0f;
+	// z = Wx + b
+	for (int j = 0; j < params.size; ++j) {
+		activations[params.size * (half_part % 2)] += activations[params.size*((half_part + 1) % 2) + j] * w_b[w_b_pos + j];
+	}
+	// + b
+	activations[params.size * (half_part % 2)] += w_b[w_b_pos + params.size];
+	
+	return activations[params.size * (half_part % 2)];
+}
+
+float sdSphere(vec3 p, float s) {
+	return length(p) - s;
+}
+
+
+vec2 RayBoxIntersection(vec3 ray_pos, vec3 ray_dir, vec3 boxMin, vec3 boxMax) {
+	ray_dir.x = 1.0 / ray_dir.x;
+	ray_dir.y = 1.0 / ray_dir.y;
+	ray_dir.z = 1.0 / ray_dir.z;
+
+	float lo = ray_dir.x * (boxMin.x - ray_pos.x);
+	float hi = ray_dir.x * (boxMax.x - ray_pos.x);
+
+	float tmin = min(lo, hi);
+
+	float tmax = max(lo, hi);
+
+	float lo1 = ray_dir.y * (boxMin.y - ray_pos.y);
+	float hi1 = ray_dir.y * (boxMax.y - ray_pos.y);
+
+	tmin = max(tmin, min(lo1, hi1));
+	tmax = min(tmax, max(lo1, hi1));
+
+	float lo2 = ray_dir.z * (boxMin.z - ray_pos.z);
+	float hi2 = ray_dir.z * (boxMax.z - ray_pos.z);
+
+	tmin = max(tmin, min(lo2, hi2));
+	tmax = min(tmax, max(lo2, hi2));
+
+	return vec2(tmin, tmax);
+}
+
+mat3 lookAt(vec3 cameraPos, vec3 lookAtPoint, vec3 up) {
+    vec3 cd = normalize(lookAtPoint - cameraPos); // camera direction
+    vec3 cr = normalize(cross(up, cd)); // camera right
+    vec3 cu = normalize(cross(cd, cr)); // camera up
+
+    return mat3(-cr, cu, -cd);
+}
+
+float map(vec3 p) {
+	return forward(p);
+}
+
+float rayMarch(vec3 ro, vec3 rd, vec2 tNearAndFar) {
+	float hit;
+	float pos = tNearAndFar.x;
+	for(int i = 0; i < MAX_STEPS; i++) {
+		vec3 p = ro + pos * rd;
+		hit = map(p);
+		pos += hit;
+		if(abs(hit) < EPS)
+			break;
+		if(pos > tNearAndFar.y) {
+			break;
+		}
+	}
+	return pos;
+}
+
+
+vec3 getNormal(vec3 p) {
+	vec2 e = vec2(EPS*5 , 0.0);
+	vec3 normal = vec3(map(p)) - vec3(map(p - e.xyy), map(p - e.yxy), map(p - e.yyx));
+	return normalize(normal);
+}
+
+
+vec3 getLight(vec3 p, vec3 rd, vec3 color) {
+    // Light source (position)
+    vec3 lightSource = vec3(20.0, 40.0, 30.0);
+
+    // Vector from point to light - L
+    vec3 L = normalize(lightSource - p);
+    // Normal of point p - N
+    vec3 N = getNormal(p);
+    // Vector from p to camera - V
+    vec3 V = -rd;
+    // Reflected light - R
+    vec3 R = reflect(-L, N);
+
+    vec3 diffuse = color * clamp(dot(L, N), 0.0, 1.0);
+    vec3 ambient = color * 0.05;
+    vec3 fresnel = 0.10 * color * pow(1.0 + dot(rd, N), 3.0);
+
+    return diffuse + ambient + fresnel;
+}
+
+float map(float value, float min1, float max1, float min2, float max2) {
+  return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
+}
+
+void main() {
+  if(gl_GlobalInvocationID.x >= SCREEN_WIDTH || gl_GlobalInvocationID.y >= SCREEN_HEIGHT)
+    return;
+
+  vec2 iResolution = vec2(float(SCREEN_WIDTH), float(SCREEN_HEIGHT));
+	vec2 uv = ((gl_GlobalInvocationID.xy + 0.5) - 0.5 * iResolution.xy) / iResolution.y;
+	 
+	vec3 up = vec3(0.0, 1.0, 0.0);
+	vec3 lookAtPoint = vec3(-0.07, 0.16, 0.);
+	vec3 ro = vec3(0., 0.5, 3.0);
+
+	mat3 lookAt = lookAt(ro, lookAtPoint, up);
+	vec3 rd = lookAt * normalize(vec3(uv, -CAMERA_FOV));
+
+	vec3 col = vec3(0.0, 0.0, 0.0);
+	
+	vec2 tNearAndFar = RayBoxIntersection(ro, rd, vec3(-1.0, -1.0, -1.0), vec3(1.0, 1.0, 1.0));
+	if(tNearAndFar.x < tNearAndFar.y && tNearAndFar.x > 0.0){
+		float dist = rayMarch(ro, rd, tNearAndFar);
+		if(dist < tNearAndFar.y) {
+			col = getLight(ro + rd * dist, rd, vec3(0.6706, 0.7216, 0.8549));
+		} else
+			col = vec3(0.0, 0.0, 0.0);
+	}
+
+	uint pos = gl_GlobalInvocationID.y * SCREEN_WIDTH + gl_GlobalInvocationID.x;
+
+	col = clamp(col, 0.0, 1.0);
+	col = pow(col, vec3(1.0 / 2.2));
+	vec4 color = vec4(col, 1.0);
+  	imageData[pos].value = color;
+}

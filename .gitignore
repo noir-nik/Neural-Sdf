@@ -1,0 +1,8 @@
+output/
+build/
+
+*.exe
+*.bmp
+*.bin
+
+!data/*
