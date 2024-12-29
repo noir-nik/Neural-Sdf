@@ -1,8 +1,4 @@
-
-CC := g++
-
 BUILD_DIR := build
-TARGET := neural-sdf
 TARGET := neural-sdf
 
 RENDER_DIR := output
@@ -14,8 +10,7 @@ CXXFLAGS := -MP -MMD -fopenmp -O2 $(INCLUDES) -DNDEBUG
 SRCS := $(wildcard source/*.cpp)
 OBJS := $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(notdir $(SRCS))) 
 
-# DEPFILES := $(OBJS:.o=.d)
-# -include $(DEPFILES)
+DEPFILES := $(OBJS:.o=.d)
 
 ifeq ($(OS), Windows_NT)
 LDFLAGS += -fopenmp -lvulkan-1
@@ -35,11 +30,11 @@ create_dirs:
 
 $(TARGET): $(OBJS)
 	@echo "Linking $(TARGET)"
-	@$(CC) $(OBJS) $(LDFLAGS) -o $(TARGET)
+	@$(CXX) $(OBJS) $(LDFLAGS) -o $(TARGET)
 
 $(BUILD_DIR)/%.o: source/%.cpp
 	@echo "Compiling $(notdir $<)"
-	@$(CC) $(CXXFLAGS) -c $< -o $@
+	@$(CXX) $(CXXFLAGS) -c $< -o $@
 
 shader:
 	glslangValidator -V shaders/neural_sdf.comp -o shaders/neural_sdf.spv
@@ -48,5 +43,10 @@ run:
 	@$(TARGET)
 
 clean:
-	@rm -f $(TARGET) $(wildcard $(BUILD_DIR)/*.o) 
-# $(wildcard $(RENDER_DIR)/*) $(DEPFILES)
+	@$(RM) \
+	$(TARGET) \
+	$(wildcard $(BUILD_DIR)/*.o) \
+	$(wildcard $(RENDER_DIR)/*) \
+	$(DEPFILES)
+
+-include $(DEPFILES)
